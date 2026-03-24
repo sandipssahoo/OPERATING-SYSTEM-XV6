@@ -8,6 +8,13 @@ struct mlfqinfo {
   int times_scheduled;
   int total_syscalls;
 };
+ struct vmstats {
+   int page_faults;
+   int pages_evicted;
+   int pages_swapped_in;
+   int pages_swapped_out;
+   int resident_pages;
+  };
 
 int getlevel(void);
 
@@ -41,6 +48,7 @@ int getsyscount(void);
 int getchildsyscount(int);
 int getlevel(void);
 int getmlfqinfo(int pid,struct mlfqinfo*);
+int getvmstats(int pid, struct vmstats *info);
 
 
 

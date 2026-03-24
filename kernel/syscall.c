@@ -109,6 +109,7 @@ extern uint64 sys_getsyscount(void);
 extern uint64 sys_getchildsyscount(void);
 extern uint64 sys_getlevel(void);
 extern uint64 sys_getmlfqinfo(void);
+extern uint64 sys_getvmstats(void);
 
 
 
@@ -144,6 +145,7 @@ static uint64 (*syscalls[])(void) = {
 [SYS_getchildsyscount] sys_getchildsyscount,
 [SYS_getlevel]    sys_getlevel,
 [SYS_getmlfqinfo] sys_getmlfqinfo,
+[SYS_getvmstats]   sys_getvmstats,
 };
 
 void syscall(void)

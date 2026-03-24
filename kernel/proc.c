@@ -131,6 +131,11 @@ found:
   for(int i=0;i<4;i++)p->ticks_per_level[i]=0;
   p->times_scheduled=0;
   p->syscalls_at_level=0;
+  p->page_faults      = 0;
+  p->pages_evicted    = 0;
+  p->pages_swapped_in = 0;
+  p->pages_swapped_out= 0;
+  p->resident_pages   = 0;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){

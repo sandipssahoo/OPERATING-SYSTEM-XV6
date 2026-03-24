@@ -111,6 +111,13 @@ struct proc {
   struct inode *cwd;           // Current directory
   char name[16];     // Process name (debugging)
   int syscount;
+
+  
+  int page_faults;          // number of page faults handled
+  int pages_evicted;        // number of pages evicted from this process
+  int pages_swapped_in;     // number of pages restored from swap
+  int pages_swapped_out;    // number of pages written to swap
+  int resident_pages;       // current pages resident in physical memory
 };
 // struct proc {
 //   // ...existing code...
