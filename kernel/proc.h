@@ -113,7 +113,7 @@ struct proc {
   int syscount;
 
   
-  int page_faults;          // number of page faults handled
+  int page_faults;          // number of page faults handled correctly
   int pages_evicted;        // number of pages evicted from this process
   int pages_swapped_in;     // number of pages restored from swap
   int pages_swapped_out;    // number of pages written to swap

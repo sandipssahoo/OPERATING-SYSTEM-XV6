@@ -1,239 +1,123 @@
-// vmtest.c – PA3 test program
-//
-// Tests:
-//   1. Basic page fault + lazy allocation
-//   2. Force page replacement by allocating > MAXFRAMES pages
-//   3. Verify swap-in by accessing evicted pages again
-//   4. Scheduler-aware eviction: lower-priority (CPU-bound) process
-//      loses pages before a higher-priority (syscall-heavy) process
-//   5. getvmstats() correctness
-
 #include "kernel/types.h"
-#include "kernel/stat.h"
 #include "user/user.h"
 
-// Must match MAXFRAMES in frametable.h  (256 frames × 4KB = 1MB)
-#define MAXFRAMES   256
-#define PAGE_SIZE   4096
-#define TEST_PAGES  (MAXFRAMES + 64)   // deliberately exceed physical limit
+#define PGSIZE  4096
+#define NFRAMES 128
 
-// -----------------------------------------------------------------------
-// Helper: print vmstats for a pid
-// -----------------------------------------------------------------------
-static void
-print_vmstats(const char *label, int pid)
-{
-  struct vmstats vs;
-  if (getvmstats(pid, &vs) < 0) {
-    printf("  [%s] getvmstats(%d) failed\n", label, pid);
-    return;
-  }
-  printf("  [%s] pid=%d  faults=%d  evicted=%d  swapped_out=%d  swapped_in=%d  resident=%d\n",
-         label, pid,
-         vs.page_faults, vs.pages_evicted,
-         vs.pages_swapped_out, vs.pages_swapped_in,
-         vs.resident_pages);
+int pass=0,fail=0;
+
+void check(const char *name, int cond) {
+    if (cond){
+        printf("  [PASS] %s\n", name); pass++; 
+    }
+    else{ 
+        printf("  [FAIL] %s\n", name); fail++; 
+    }
 }
 
-// -----------------------------------------------------------------------
-// Test 1: Basic lazy allocation – each page touched for the first time
-// -----------------------------------------------------------------------
-static void
-test_basic_fault(void)
-{
-  printf("\n=== Test 1: Basic lazy allocation ===\n");
-  int pid = getpid();
-  struct vmstats before, after;
-  getvmstats(pid, &before);
-
-  // Allocate 16 pages and write to each
-  int n = 16;
-  char *buf = sbrk(n * PAGE_SIZE);
-  if (buf == (char *)-1) { printf("sbrk failed\n"); return; }
-
-  for (int i = 0; i < n; i++) {
-    buf[i * PAGE_SIZE] = (char)(i + 1);   // triggers page fault
-  }
-
-  getvmstats(pid, &after);
-  printf("  pages touched: %d\n", n);
-  printf("  new page_faults: %d  new resident: %d\n",
-         after.page_faults - before.page_faults,
-         after.resident_pages - before.resident_pages);
-
-  if (after.page_faults - before.page_faults >= n)
-    printf("  PASS: page faults counted correctly\n");
-  else
-    printf("  WARN: fewer faults than expected (some pages may share frames)\n");
+void get_stats(struct vmstats *s) {
+    getvmstats(getpid(), s);
 }
 
-// -----------------------------------------------------------------------
-// Test 2: Force page replacement
-// Allocate TEST_PAGES pages (> MAXFRAMES), verify pages_evicted > 0
-// -----------------------------------------------------------------------
-static void
-test_replacement(void)
-{
-  printf("\n=== Test 2: Force page replacement ===\n");
-  int pid = getpid();
-  struct vmstats before, after;
-  getvmstats(pid, &before);
+int main(void) {
+    printf("=== PA3 Test ===\n");
+    struct vmstats s;
 
-  char *buf = sbrk((uint64)TEST_PAGES * PAGE_SIZE);
-  if (buf == (char *)-1) { printf("sbrk failed\n"); return; }
+    // ── Test 1: Basic lazy allocation + page faults
+    printf("\n[1] Basic: %d pages, no eviction\n", NFRAMES / 2);
+    int n = NFRAMES / 2;
+    char *b = sbrklazy(n * PGSIZE);
+    for (int i = 0; i < n; i++) b[i * PGSIZE] = (char)i;
+    get_stats(&s);
+    check("page_faults == n",        s.page_faults == n);
+    check("no evictions yet",        s.pages_evicted == 0);
+    check("resident == n",           s.resident_pages == n);
+    sbrk(-(n * PGSIZE));
 
-  // Touch every page sequentially (clock should evict some)
-  for (int i = 0; i < TEST_PAGES; i++) {
-    buf[(uint64)i * PAGE_SIZE] = (char)(i & 0xFF);
-  }
+    // ── Test 2: Eviction triggered, data integrity 
+    printf("\n[2] Eviction + data integrity: %d pages\n", NFRAMES + 50);
+    n = NFRAMES + 100;
+    b = sbrklazy(n * PGSIZE);
+    for (int i = 0; i < n; i++) b[i * PGSIZE] = (char)(i & 0xff);
 
-  getvmstats(pid, &after);
-  printf("  pages allocated: %d  (MAXFRAMES=%d)\n", TEST_PAGES, MAXFRAMES);
-  print_vmstats("after seq write", pid);
+    int errs = 0;
+    for (int i = 0; i < n; i++)
+        if (b[i * PGSIZE] != (char)(i & 0xff)) errs++;
 
-  if (after.pages_evicted > 0)
-    printf("  PASS: eviction occurred (%d pages evicted)\n", after.pages_evicted);
-  else
-    printf("  FAIL: no evictions recorded\n");
-}
+    get_stats(&s);
+    printf("  faults=%d evicted=%d swapped_out=%d swapped_in=%d resident=%d\n",
+           s.page_faults, s.pages_evicted,
+           s.pages_swapped_out, s.pages_swapped_in, s.resident_pages);
+    check("data intact after eviction",      errs == 0);
+    check("evictions happened",              s.pages_evicted > 0);
+    check("swap_out == evicted",             s.pages_evicted == s.pages_swapped_out);
+    check("swap_in > 0",                     s.pages_swapped_in > 0);
+    check("resident never exceeds NFRAMES",  s.resident_pages <= NFRAMES);
+    sbrk(-(n * PGSIZE));
 
-// -----------------------------------------------------------------------
-// Test 3: Swap-in – re-access evicted pages
-// After Test 2 buf is still mapped; re-reading evicted pages should
-// trigger swap-in faults.
-// -----------------------------------------------------------------------
-static void
-test_swapin(char *buf)
-{
-  printf("\n=== Test 3: Swap-in (re-access evicted pages) ===\n");
-  int pid = getpid();
-  struct vmstats before, after;
-  getvmstats(pid, &before);
+    // ── Test 3: Swap slot reuse (multiple cycles)
+    printf("\n[3] Swap slot reuse across cycles\n");
+    int all_ok = 1;
+    for (int c = 0; c < 5; c++) {
+        char *cb = sbrklazy((NFRAMES + 20) * PGSIZE);
+        for (int i = 0; i < NFRAMES + 20; i++) cb[i * PGSIZE] = (char)(c + i);
+        for (int i = 0; i < NFRAMES + 20; i++)
+            if (cb[i * PGSIZE] != (char)(c + i)) { all_ok = 0; break; }
+        sbrk(-((NFRAMES + 20) * PGSIZE));
+    }
+    check("data correct across 5 swap cycles", all_ok);
 
-  // Re-read all pages – evicted ones will be swapped back in
-  volatile int sum = 0;
-  for (int i = 0; i < TEST_PAGES; i++) {
-    sum += (unsigned char)buf[(uint64)i * PAGE_SIZE];
-  }
-  (void)sum;
+    // ── Test 4: getvmstats invalid PID
+    printf("\n[4] getvmstats invalid PID\n");
+    check("returns -1 for PID 99999", getvmstats(99999, &s) == -1);
 
-  getvmstats(pid, &after);
-  int new_swapped_in = after.pages_swapped_in - before.pages_swapped_in;
-  printf("  new swap-ins: %d\n", new_swapped_in);
-  print_vmstats("after re-read", pid);
+    // ── Test 5: Scheduler-aware — CPU-bound loses more pages
+    printf("\n[5] Scheduler-aware eviction\n");
+    int pid_cpu = fork();
+    if (pid_cpu == 0) {
+        int npages = NFRAMES + 80;
+        char *mb = sbrklazy((uint64)npages * PGSIZE);
+        for (int j = 0; j < npages; j++) {
+            mb[j * PGSIZE] = 1;
+        }
+        volatile long x = 0;
+        for (long i = 0; i < 100L; i++) x += i;
+        for (int iter = 0; iter < 10; iter++) {
+            for (int j = 0; j < npages; j++) {
+                volatile char c = mb[j * PGSIZE];
+                c++;
+            }
+            for (long i = 0; i < 2000000L; i++) x += i;
+        }
+        pause(500); exit(0);
+    }
+    
+    int pid_sys = fork();
+    if (pid_sys == 0) {
+        int npages = NFRAMES + 80;
+        char *mb = sbrklazy((uint64)npages * PGSIZE);
+        for (int j = 0; j < npages; j++) {
+            mb[j * PGSIZE] = 2;
+        }
+        for (int iter = 0; iter < 20; iter++) {
+            for (int j = 0; j < npages; j++) {
+                volatile char c = mb[j * PGSIZE];
+                c++;
+                for (int k = 0; k < 1000; k++) getpid();
+            }
+        }
+        pause(500); exit(0);
+    }
+    pause(150);
 
-  if (new_swapped_in > 0)
-    printf("  PASS: swap-in occurred\n");
-  else
-    printf("  WARN: no swap-ins (pages may still be resident)\n");
-}
+    struct vmstats sc, ss;
+    getvmstats(pid_cpu, &sc);
+    getvmstats(pid_sys, &ss);
+    printf("  cpu_evicted=%d  sys_evicted=%d\n", sc.pages_evicted, ss.pages_evicted);
+    check("cpu-bound evicted >= syscall-heavy", sc.pages_evicted >= ss.pages_evicted);
 
-// -----------------------------------------------------------------------
-// Test 4: Scheduler-aware eviction
-// Fork two children:
-//   child A (CPU-bound, will demote to low MLFQ level)
-//   child B (syscall-heavy, stays at high MLFQ level)
-// Both allocate TEST_PAGES.  We expect child A to lose more pages.
-// -----------------------------------------------------------------------
-static void
-test_scheduler_aware(void)
-{
-  printf("\n=== Test 4: Scheduler-aware eviction ===\n");
-
-  int pid_cpu = fork();
-  if (pid_cpu == 0) {
-    // CPU-bound child: pure arithmetic, no syscalls → demotes to level 3
-    char *buf = sbrk((uint64)TEST_PAGES * PAGE_SIZE);
-    if (buf == (char *)-1) exit(1);
-    for (int i = 0; i < TEST_PAGES; i++)
-      buf[(uint64)i * PAGE_SIZE] = (char)i;
-
-    // Spin to accumulate CPU ticks and get demoted
-    volatile long x = 1;
-    for (long k = 0; k < 200000000L; k++) x = x * 3 + k;
-    (void)x;
-
-    // Touch pages again so they fault back in
-    for (int i = 0; i < TEST_PAGES; i++)
-      buf[(uint64)i * PAGE_SIZE] += 1;
-
+    kill(pid_cpu); kill(pid_sys);
+    wait(0); wait(0);
+    printf("\n=== Results: %d passed, %d failed ===\n", pass, fail);
     exit(0);
-  }
-
-  int pid_sys = fork();
-  if (pid_sys == 0) {
-    // Syscall-heavy child: stays at MLFQ level 0
-    char *buf = sbrk((uint64)TEST_PAGES * PAGE_SIZE);
-    if (buf == (char *)-1) exit(1);
-    for (int i = 0; i < TEST_PAGES; i++)
-      buf[(uint64)i * PAGE_SIZE] = (char)i;
-
-    // Make many syscalls to stay at high priority
-    for (int k = 0; k < 100000; k++) getpid();
-
-    // Touch pages again
-    for (int i = 0; i < TEST_PAGES; i++)
-      buf[(uint64)i * PAGE_SIZE] += 1;
-
-    exit(0);
-  }
-
-  // Let children run for a while
-  pause(50);
-
-  printf("  CPU-bound child (pid=%d):\n", pid_cpu);
-  print_vmstats("cpu", pid_cpu);
-  printf("  Syscall-heavy child (pid=%d):\n", pid_sys);
-  print_vmstats("sys", pid_sys);
-
-  struct vmstats cpu_vs, sys_vs;
-  getvmstats(pid_cpu, &cpu_vs);
-  getvmstats(pid_sys, &sys_vs);
-
-  if (cpu_vs.pages_evicted >= sys_vs.pages_evicted)
-    printf("  PASS: CPU-bound process lost >= pages than syscall-heavy\n");
-  else
-    printf("  INFO: syscall-heavy lost more pages (timing-dependent)\n");
-
-  wait(0);
-  wait(0);
-}
-
-// -----------------------------------------------------------------------
-// Test 5: getvmstats() – invalid pid returns -1
-// -----------------------------------------------------------------------
-static void
-test_getvmstats_invalid(void)
-{
-  printf("\n=== Test 5: getvmstats() error handling ===\n");
-  struct vmstats vs;
-  int ret = getvmstats(99999, &vs);
-  if (ret == -1)
-    printf("  PASS: getvmstats(invalid pid) returned -1\n");
-  else
-    printf("  FAIL: expected -1, got %d\n", ret);
-}
-
-// -----------------------------------------------------------------------
-// main
-// -----------------------------------------------------------------------
-int
-main(void)
-{
-  printf("PA3 VM Test starting (pid=%d)\n", getpid());
-
-  test_basic_fault();
-
-  // Save buf pointer before replacement test so we can use it in swap-in test
-  // (sbrk() is cumulative; we snapshot current brk)
-  char *pre_brk = sbrk(0);
-  test_replacement();
-  // The buf from test_replacement starts at pre_brk
-  test_swapin(pre_brk);
-
-  test_scheduler_aware();
-  test_getvmstats_invalid();
-
-  printf("\n=== All tests done ===\n");
-  exit(0);
 }

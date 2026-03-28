@@ -26,6 +26,11 @@ struct {
 void
 kinit()
 {
+  // initlock(&kmem.lock, "kmem");
+  // // // PA3: limit RAM to force page replacement
+  // // char *limit = (char*)PGROUNDUP((uint64)end) + 3 * 1024 * 1024;
+  // // if(limit > (char*)PHYSTOP) limit = (char*)PHYSTOP;
+  // freerange(end, limit);
   initlock(&kmem.lock, "kmem");
   freerange(end, (void*)PHYSTOP);
 }

@@ -2,14 +2,11 @@
 #define SWAP_H
 
 #include "types.h"
-
-// Maximum number of swap slots.
-// Each slot holds one 4096-byte page.
-#define MAX_SWAP_SLOTS 128
+#define MAX_SWAP_SLOTS 512
 
 // A swap slot descriptor.
 struct swap_slot {
-  int   used;        // 1 if this slot is occupied
+  int   used;        // 1 if this slot is occupied and 0 if unoccupied
   int   pid;         // owning process pid (for debugging)
   uint64 va;         // virtual address that was swapped out
   char  data[4096];  // the actual page contents

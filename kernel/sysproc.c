@@ -54,9 +54,6 @@ sys_sbrk(void)
       return -1;
     }
   } else {
-    // Lazily allocate memory for this process: increase its memory
-    // size but don't allocate memory. If the processes uses the
-    // memory, vmfault() will allocate it.
     if(addr + n < addr)
       return -1;
     if(addr + n > TRAPFRAME)
@@ -220,36 +217,38 @@ sys_getvmstats(void)
 {
   int pid;
   uint64 info_addr;
- 
   argint(0, &pid);
   argaddr(1, &info_addr);
- 
-  // Find target process
+
   struct proc *target = 0;
   extern struct proc proc[NPROC];
-  for (struct proc *p = proc; p < &proc[NPROC]; p++) {
-    if (p->pid == pid) {
+  for(struct proc *p = proc; p < &proc[NPROC]; p++){
+    if(p->pid == pid){
       target = p;
       break;
     }
   }
-  if (target == 0)
+
+  if(target == 0){
     return -1;
- 
-  // Build vmstats struct
+  }
+  // printf("getvmstats: pid=%d faults=%d resident=%d evicted=%d\n",
+  //        target->pid,
+  //        target->page_faults,
+  //        target->resident_pages,
+  //        target->pages_evicted);
+
   struct vmstats info;
-  acquire(&target->lock);
-  info.page_faults     = target->page_faults;
-  info.pages_evicted   = target->pages_evicted;
+  info.page_faults       = target->page_faults;
+  info.pages_evicted     = target->pages_evicted;
   info.pages_swapped_in  = target->pages_swapped_in;
   info.pages_swapped_out = target->pages_swapped_out;
-  info.resident_pages  = target->resident_pages;
-  release(&target->lock);
- 
-  // Copy to user space
-  if (copyout(myproc()->pagetable, info_addr,
-              (char *)&info, sizeof(info)) < 0)
+  info.resident_pages    = target->resident_pages;
+
+  if(copyout(myproc()->pagetable, info_addr,
+             (char *)&info, sizeof(info)) < 0){
     return -1;
- 
+  }
+
   return 0;
 }

@@ -1,11 +1,3 @@
-// swap.c  –  simple in-memory swap area for PA3
-//
-// swap_init()         : called once at boot from main.c
-// swap_out(page,pid,va) : copy 4096 bytes from 'page' into a free slot;
-//                         returns slot index on success, -1 if swap is full
-// swap_in(slot, buf)  : copy slot contents into 'buf' (caller provides 4096-byte buffer)
-// swap_free(slot)     : mark slot as free
-
 #include "types.h"
 #include "param.h"
 #include "riscv.h"      // ← MUST come before defs.h
@@ -27,9 +19,6 @@ swap_init(void)
     swap_area[i].va   = 0;
   }
 }
-
-// Copy page contents into a free swap slot.
-// Returns the slot index on success, -1 if swap is full.
 int
 swap_out(char *page, int pid, uint64 va)
 {

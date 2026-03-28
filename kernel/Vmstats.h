@@ -1,9 +1,4 @@
 // vmstats.h – virtual memory statistics structure (PA3)
-//
-// Include in:
-//   kernel/sysproc.c  (for sys_getvmstats)
-//   user/user.h        (redeclared for user-space programs)
-
 #ifndef VMSTATS_H
 #define VMSTATS_H
 

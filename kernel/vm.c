@@ -201,8 +201,10 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
     panic("uvmunmap: not aligned");
 
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
-    if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
+    if((pte = walk(pagetable, a, 0)) == 0){
+      continue;
+    }
+      
 
     // PA3: handle swapped-out pages (PTE_V=0, PTE_SWAPPED=1)
     if((*pte & PTE_V) == 0){
@@ -210,8 +212,12 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
         // Free the swap slot so it can be reused
         swap_free(PTE_SWAP_SLOT(*pte));
         *pte = 0;
-        continue;            // nothing in physical memory to free
+        continue;
       }
+      if(*pte == 0){
+        continue;
+      }
+      // Otherwise, it's an error
       panic("uvmunmap: not mapped");
     }
 
@@ -368,7 +374,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0) {
-      if((pa0 = vmfault(pagetable, va0, 0)) == 0) {
+      if((pa0 = vmfault_alloc(pagetable, va0, 0)) == 0) {
         return -1;
       }
     }
@@ -402,7 +408,7 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0) {
-      if((pa0 = vmfault(pagetable, va0, 0)) == 0) {
+      if((pa0 = vmfault_alloc(pagetable, va0, 0)) == 0) {
         return -1;
       }
     }
@@ -460,133 +466,107 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return -1;
   }
 }
+
 char *
 kalloc_or_evict(void)
 {
+  if(frametable_used() >= MAXFRAMES){
+    uint64 freed = clock_evict();
+    if(freed == 0) return 0;
+  }
+
   char *mem = kalloc();
-  if (mem == 0) {
-    // Physical memory exhausted → run Clock eviction
-    uint64 freed_pa = clock_evict();
-    if (freed_pa == 0)
-      return 0;  // swap also full; give up
-    // After eviction the frame is kfree'd inside clock_evict().
-    // Try kalloc() again now that one frame is free.
+  if(mem == 0){
+    uint64 freed = clock_evict();
+    if(freed == 0) return 0;
     mem = kalloc();
   }
   return mem;
 }
+uint64
+vmfault_alloc(pagetable_t pagetable, uint64 va, int read)
+{
+  struct proc *p = myproc();
 
-// allocate and map user memory if process is referencing a page
-// that was lazily allocated in sys_sbrk().
-// returns 0 if va is invalid or already mapped, or if
-// out of physical memory, and physical address if successful.
-// uint64
-// vmfault(pagetable_t pagetable, uint64 va, int read)
-// {
-//   uint64 mem;
-//   struct proc *p = myproc();
+  if(va >= p->sz)
+    return 0;
 
-//   if (va >= p->sz)
-//     return 0;
-//   va = PGROUNDDOWN(va);
-//   if(ismapped(pagetable, va)) {
-//     return 0;
-//   }
-//   mem = (uint64) kalloc();
-//   if(mem == 0)
-//     return 0;
-//   memset((void *) mem, 0, PGSIZE);
-//   if (mappages(p->pagetable, va, PGSIZE, mem, PTE_W|PTE_U|PTE_R) != 0) {
-//     kfree((void *)mem);
-//     return 0;
-//   }
-//   return mem;
-// }
+  va = PGROUNDDOWN(va);
+
+  if(ismapped(pagetable, va))
+    return 0;
+
+  char *mem = kalloc_or_evict();
+  if(mem == 0)
+    return 0;
+
+  memset(mem, 0, PGSIZE);
+
+  if(mappages(p->pagetable, va, PGSIZE, (uint64)mem,
+              PTE_W|PTE_U|PTE_R) != 0){
+    kfree(mem);
+    return 0;
+  }
+
+  frametable_add((uint64)mem, p->pid, va);
+
+  return (uint64)mem;
+}
 int
 vmfault(pagetable_t pagetable, uint64 va, int is_load)
 {
-  (void)is_load;  // we treat load and store faults identically
- 
+  (void)is_load;
+
   struct proc *p = myproc();
-  if (p == 0) return 0;
- 
-  // Align va to page boundary
+  // printf("vmfault: pid=%d va=%ld faults_so_far=%d\n",
+  //        p->pid, va, p->page_faults);
+  if(p == 0) return 0;
+
   uint64 page_va = PGROUNDDOWN(va);
- 
-  // Reject obviously bad addresses
-  if (page_va >= p->sz || page_va < 0)
+
+  if(page_va >= p->sz)
     return 0;
- 
-  // ------------------------------------------------------------------
-  // Case 1: page is swapped out (PTE_SWAPPED set, PTE_V clear)
-  // ------------------------------------------------------------------
+
+  // Case 1 = page is swapped out (PTE_SWAPPED set, PTE_V=0)
   pte_t *pte = walk(pagetable, page_va, 0);
-  if (pte && !(*pte & PTE_V) && (*pte & PTE_SWAPPED)) {
+  if(pte && !(*pte & PTE_V) && (*pte & PTE_SWAPPED)){
     int slot = PTE_SWAP_SLOT(*pte);
- 
-    // Allocate a frame (evicting if necessary)
+
     char *mem = kalloc_or_evict();
-    if (mem == 0) {
-      printf("vmfault: out of memory (swap in)\n");
-      return 0;
-    }
- 
-    // Restore page contents from swap
-    if (swap_in(slot, mem) < 0) {
+    if(mem == 0) return 0;
+
+    if(swap_in(slot, mem) < 0){
       kfree(mem);
       return 0;
     }
     swap_free(slot);
- 
-    // Map the page into the page table with user R/W/X permissions
-    if (mappages(pagetable, page_va, PGSIZE, (uint64)mem,
-                 PTE_W | PTE_R | PTE_X | PTE_U) < 0) {
+
+    if(mappages(pagetable, page_va, PGSIZE, (uint64)mem,
+                PTE_W|PTE_R|PTE_X|PTE_U) < 0){
       kfree(mem);
       return 0;
     }
- 
-    // Register in frame table
+
     frametable_add((uint64)mem, p->pid, page_va);
- 
-    // Update statistics
-    acquire(&p->lock);
     p->page_faults++;
     p->pages_swapped_in++;
-    p->resident_pages++;
-    release(&p->lock);
- 
+    // p->resident_pages++;
     return 1;
   }
- 
-  // ------------------------------------------------------------------
-  // Case 2: lazy allocation – no PTE at all (or PTE_V clear, no swap)
-  // ------------------------------------------------------------------
-  // Check that the address is within the process heap
-  if (va >= p->sz)
-    return 0;
- 
+  // Case 2: lazy allocation (page never mapped)
   char *mem = kalloc_or_evict();
-  if (mem == 0) {
-    printf("vmfault: out of memory (lazy alloc)\n");
-    return 0;
-  }
+  if(mem == 0) return 0;
+
   memset(mem, 0, PGSIZE);
- 
-  if (mappages(pagetable, page_va, PGSIZE, (uint64)mem,
-               PTE_W | PTE_R | PTE_X | PTE_U) < 0) {
+
+  if(mappages(pagetable, page_va, PGSIZE, (uint64)mem,
+              PTE_W|PTE_R|PTE_X|PTE_U) < 0){
     kfree(mem);
     return 0;
   }
- 
-  // Register in frame table
   frametable_add((uint64)mem, p->pid, page_va);
- 
-  // Update statistics
-  acquire(&p->lock);
   p->page_faults++;
   p->resident_pages++;
-  release(&p->lock);
- 
   return 1;
 }
 
